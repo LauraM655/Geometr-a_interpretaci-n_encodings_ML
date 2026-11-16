@@ -21,6 +21,8 @@ ENCODING_TYPES <- c("dummy", "effects", "helmert")
 ENCODING_NAMES <- c(dummy   = "Dummy (nivel de referencia)",
                     effects = "Efectos (suma cero)",
                     helmert = "Helmert")
+ENCODING_SHORT <- c(dummy = "Dummy", effects = "Efectos", helmert = "Helmert")
+ENC_COL <- c(dummy = "#e4572e", effects = "#0f766e", helmert = "#7c3aed")
 
 # ---- 1. Matrices de codificacion -------------------------------------
 
@@ -48,14 +50,14 @@ coding_matrix <- function(K, type) {
 coef_labels <- function(lev, type) {
   K <- length(lev)
   rest <- switch(type,
-    dummy   = paste0(lev[-1], " vs ", lev[1]),
-    effects = paste0(lev[-K], " vs media"),
-    helmert = vapply(seq_len(K - 1), function(j) {
-      prev <- if (j == 1) lev[1]
-              else if (j <= 3) paste0("prom(", paste(lev[1:j], collapse = ","), ")")
-              else paste0("prom(", lev[1], "..", lev[j], ")")
-      paste0(lev[j + 1], " vs ", prev)
-    }, character(1))
+                 dummy   = paste0(lev[-1], " vs ", lev[1]),
+                 effects = paste0(lev[-K], " vs media"),
+                 helmert = vapply(seq_len(K - 1), function(j) {
+                   prev <- if (j == 1) lev[1]
+                   else if (j <= 3) paste0("prom(", paste(lev[1:j], collapse = ","), ")")
+                   else paste0("prom(", lev[1], "..", lev[j], ")")
+                   paste0(lev[j + 1], " vs ", prev)
+                 }, character(1))
   )
   c("(Intercepto)", rest)
 }
@@ -79,16 +81,16 @@ fit_encoding <- function(y, g, type = c("dummy", "effects", "helmert"),
   if (length(lev0) < 2) stop("El factor necesita al menos 2 niveles.")
   if (is.null(ref)) ref <- if (type == "effects") lev0[length(lev0)] else lev0[1]
   if (!ref %in% lev0) stop("El nivel de referencia no esta en el factor.")
-
+  
   lev <- if (type == "effects") c(setdiff(lev0, ref), ref) else c(ref, setdiff(lev0, ref))
   g <- factor(g, levels = lev)
   n <- length(y)
   K <- length(lev)
-
+  
   M    <- coding_matrix(K, type)
   Minv <- solve(M)
   Z    <- M[as.integer(g), , drop = FALSE]
-
+  
   has_x <- !is.null(x)
   X <- if (has_x) cbind(Z, Z * (x - x_center)) else Z
   p <- ncol(X)
@@ -97,7 +99,7 @@ fit_encoding <- function(y, g, type = c("dummy", "effects", "helmert"),
     stop("Matriz de diseno singular: hay niveles con muy pocas observaciones ",
          "(con covariable cada nivel necesita al menos 2 con x distinto).")
   }
-
+  
   XtXi  <- solve(crossprod(X))
   beta  <- drop(XtXi %*% crossprod(X, y))
   fit   <- drop(X %*% beta)
@@ -108,14 +110,14 @@ fit_encoding <- function(y, g, type = c("dummy", "effects", "helmert"),
   se    <- sqrt(diag(V))
   tval  <- beta / se
   pval  <- 2 * pt(abs(tval), dfres, lower.tail = FALSE)
-
+  
   labs <- coef_labels(lev, type)
   nm <- if (has_x) c(labs, paste0("pend.: ", labs)) else labs
   names(beta) <- names(se) <- names(tval) <- names(pval) <- nm
   dimnames(V) <- list(nm, nm)
   dimnames(Minv) <- list(labs, lev)
   dimnames(M)    <- list(lev, labs)
-
+  
   n_g <- as.vector(table(g))
   out <- list(
     type = type, ref = ref, levels = lev, K = K, n = n, p = p, df = dfres,
@@ -150,28 +152,60 @@ coef_table <- function(fit, digits = 4) {
 
 # ---- 3. Interpretacion: filas de M^{-1} ------------------------------
 
+# Helpers de formato (ASCII puro; el HTML usa entidades)
+esc_html <- function(s) {
+  s <- gsub("&", "&amp;", s, fixed = TRUE)
+  s <- gsub("<", "&lt;", s, fixed = TRUE)
+  gsub(">", "&gt;", s, fixed = TRUE)
+}
+
+#' |w| como fraccion simple ("1/3") o decimal; "" si |w| = 1
+frac_str <- function(w, maxden = 20) {
+  a <- abs(w)
+  for (d in seq_len(maxden)) {
+    num <- a * d
+    if (abs(num - round(num)) < 1e-8) {
+      num <- round(num)
+      if (d == 1) return(if (num == 1) "" else as.character(num))
+      return(paste0(num, "/", d))
+    }
+  }
+  sprintf("%.3f", a)
+}
+
 #' Para cada coeficiente: la combinacion lineal de medias que estima
 #' (fila de M^{-1}) y su lectura en palabras.
-describe_contrasts <- function(fit, digits = 3) {
-  Minv <- fit$Minv; lev <- fit$levels; K <- fit$K; type <- fit$type
+#' html = TRUE devuelve entidades HTML (mu, menos, subindices) para mostrar en la app.
+describe_contrasts <- function(fit, html = FALSE) {
+  Minv <- fit$Minv; K <- fit$K; type <- fit$type
+  lev <- if (html) esc_html(fit$levels) else fit$levels
+  labs <- if (html) esc_html(fit$labels) else fit$labels
+  
+  term <- function(w, l) {
+    sg <- if (w < 0) (if (html) "&minus;" else "-") else "+"
+    cf <- frac_str(w)
+    dot <- if (cf == "") "" else (if (html) "&middot;" else "*")
+    mu <- if (html) paste0("&mu;<sub>", l, "</sub>") else paste0("mu[", l, "]")
+    paste0(sg, cf, dot, mu)
+  }
   formula <- vapply(seq_len(K), function(i) {
     w <- Minv[i, ]
     keep <- which(abs(w) > 1e-10)
-    paste0(sprintf("%+.*f", digits, w[keep]), "*mu[", lev[keep], "]", collapse = " ")
+    paste(mapply(term, w[keep], lev[keep]), collapse = " ")
   }, character(1))
-
+  
   lectura <- switch(type,
-    dummy = c(paste0("Media del nivel de referencia (", lev[1], ")"),
-              paste0(lev[-1], " menos ", lev[1])),
-    effects = c("Promedio NO ponderado de las K medias de nivel",
-                paste0(lev[-K], " menos el promedio de niveles")),
-    helmert = c("Promedio NO ponderado de las K medias de nivel",
-                vapply(seq_len(K - 1), function(j) {
-                  paste0("(", lev[j + 1], " menos el promedio de ",
-                         paste(lev[1:j], collapse = ", "), ") / ", j + 1)
-                }, character(1)))
+                    dummy = c(paste0("Media del nivel de referencia (", lev[1], ")"),
+                              paste0(lev[-1], " menos ", lev[1])),
+                    effects = c("Promedio NO ponderado de las K medias de nivel",
+                                paste0(lev[-K], " menos el promedio de niveles")),
+                    helmert = c("Promedio NO ponderado de las K medias de nivel",
+                                vapply(seq_len(K - 1), function(j) {
+                                  paste0("(", lev[j + 1], " menos el promedio de ",
+                                         paste(lev[1:j], collapse = ", "), ") / ", j + 1)
+                                }, character(1)))
   )
-  data.frame(Coeficiente = fit$labels, Estima = formula, Lectura = lectura,
+  data.frame(Coeficiente = labs, Estima = formula, Lectura = lectura,
              row.names = NULL, check.names = FALSE)
 }
 
@@ -208,12 +242,32 @@ compare_encodings <- function(y, g, x = NULL, x_center = 0,
 EXAMPLES <- list(
   iris        = list(y = "Sepal.Length", f = "Species", x = "Petal.Length"),
   mtcars      = list(y = "mpg",          f = "cyl",     x = "wt"),
-  ToothGrowth = list(y = "len",          f = "dose",    x = "")
+  ToothGrowth = list(y = "len",          f = "dose",    x = ""),
+  CO2         = list(y = "uptake",       f = "Plant",   x = "conc"),   # 12 niveles
+  ChickWeight = list(y = "weight",       f = "Chick",   x = "Time"),   # 50 niveles
+  Simulado    = list(y = "y",            f = "g",       x = "")
 )
 
 get_example <- function(name) {
-  switch(name, iris = iris, mtcars = mtcars, ToothGrowth = ToothGrowth,
+  switch(name,
+         iris = iris, mtcars = mtcars, ToothGrowth = ToothGrowth,
+         CO2 = as.data.frame(CO2), ChickWeight = as.data.frame(ChickWeight),
          stop("Ejemplo desconocido"))
+}
+
+#' Datos simulados con K niveles (medias verdaderas conocidas en attr "mu").
+#' unbalanced = TRUE: n por nivel decrece (cociente max/min ~ 6).
+simulate_factor_data <- function(K = 12, n_per = 8, unbalanced = FALSE,
+                                 sd_mu = 1, sd_e = 1, seed = 1) {
+  set.seed(seed)
+  mu <- rnorm(K, 0, sd_mu)
+  w <- if (unbalanced) exp(seq(1, -1, length.out = K)) else rep(1, K)
+  n_g <- pmax(2, round(K * n_per * w / sum(w)))
+  g <- factor(rep(sprintf("N%02d", seq_len(K)), n_g))
+  y <- mu[as.integer(g)] + rnorm(sum(n_g), 0, sd_e)
+  out <- data.frame(y = y, g = g)
+  attr(out, "mu") <- setNames(mu, sprintf("N%02d", seq_len(K)))
+  out
 }
 
 #' Limpia y valida: casos completos, y numerico, g factor, x numerico
